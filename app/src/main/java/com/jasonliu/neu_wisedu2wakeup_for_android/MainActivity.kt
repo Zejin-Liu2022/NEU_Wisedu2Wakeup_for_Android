@@ -1,6 +1,8 @@
 package com.jasonliu.neu_wisedu2wakeup_for_android
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
@@ -110,15 +112,21 @@ fun AppScreen(modifier: Modifier = Modifier) {
 
     val exportCsvLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        val uri = result.data?.data
-        if (result.resultCode != Activity.RESULT_OK || uri == null || savingCsvContent == null) {
+    ) { activityResult ->
+        val uri = activityResult.data?.data
+        if (activityResult.resultCode != Activity.RESULT_OK || uri == null || savingCsvContent == null) {
             status = "已取消导出。"
             return@rememberLauncherForActivityResult
         }
         val csvToSave = savingCsvContent.orEmpty()
+        val grantFlags = activityResult.data?.flags ?: 0
         scope.launch {
-            val result = runCatching {
+            val saveResult = runCatching {
+                val persistableFlags = grantFlags and
+                    (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                if (persistableFlags != 0) {
+                    context.contentResolver.takePersistableUriPermission(uri, persistableFlags)
+                }
                 withContext(Dispatchers.IO) {
                     context.contentResolver.openOutputStream(uri)?.use { out ->
                         out.write("\uFEFF".toByteArray())
@@ -126,8 +134,16 @@ fun AppScreen(modifier: Modifier = Modifier) {
                     } ?: error("无法写入文件。")
                 }
             }
-            status = if (result.isSuccess) "CSV 导出成功。"
-            else "CSV 导出失败：${result.exceptionOrNull()?.message}"
+            saveResult.onSuccess {
+                val opened = openCsvWithChooser(context, uri)
+                status = if (opened) {
+                    "CSV 导出成功，已弹出打开方式。"
+                } else {
+                    "CSV 导出成功，但没有可打开 CSV 的应用。"
+                }
+            }.onFailure { e ->
+                status = "CSV 导出失败：${e.message}"
+            }
         }
     }
 
@@ -348,5 +364,21 @@ private fun buildCreateCsvIntent(fileName: String): Intent {
                 Uri.parse("content://com.android.externalstorage.documents/document/primary:Documents")
             )
         }
+    }
+}
+
+private fun openCsvWithChooser(context: Context, uri: Uri): Boolean {
+    val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, "text/csv")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    val chooser = Intent.createChooser(viewIntent, "选择应用打开课程表 CSV").apply {
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    return try {
+        context.startActivity(chooser)
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
     }
 }
