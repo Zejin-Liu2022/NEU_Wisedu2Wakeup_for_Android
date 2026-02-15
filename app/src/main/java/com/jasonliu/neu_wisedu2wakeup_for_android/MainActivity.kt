@@ -40,6 +40,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
@@ -96,7 +97,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
             val result = runCatching { NetworkDetector.detect() }
             result.onSuccess { config ->
                 networkConfig = config
-                status = "网络检测完成：${config.modeLabel}。请在下方官方页面完成登录。"
+                status = "网络检测完成：${config.modeLabel}。请在下方官方页面完成登录。登录完成后，请点击检测登录状态来确认登录结果。"
                 webView?.loadUrl(config.loginUrl)
             }.onFailure { e ->
                 networkConfig = null
@@ -163,7 +164,10 @@ fun AppScreen(modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Text("NEU 教务课程表导出")
-            Text("状态：$status")
+            Text(
+                text = "状态：$status",
+                color = statusColorForMessage(status)
+            )
             Text("登录地址：${networkConfig?.loginUrl ?: "等待网络检测"}")
             Text("网络模式：${networkConfig?.modeLabel ?: "未知"}")
             currentUser?.let { user ->
@@ -289,9 +293,6 @@ fun AppScreen(modifier: Modifier = Modifier) {
                 }
             }
 
-            if (rows.isNotEmpty()) {
-                Text("预览：${rows.take(3).joinToString(" | ") { "${it.courseName} 周${it.weeks}" }}")
-            }
             if (loading) {
                 Text("处理中，请稍候...")
             }
@@ -364,6 +365,14 @@ private fun buildCreateCsvIntent(fileName: String): Intent {
                 Uri.parse("content://com.android.externalstorage.documents/document/primary:Documents")
             )
         }
+    }
+}
+
+private fun statusColorForMessage(status: String): Color {
+    return when {
+        status.startsWith("课表获取失败") -> Color(0xFFC62828)
+        status.startsWith("课表获取完成") -> Color(0xFF2E7D32)
+        else -> Color.Black
     }
 }
 
