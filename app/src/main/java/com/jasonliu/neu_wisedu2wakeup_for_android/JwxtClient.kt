@@ -51,15 +51,21 @@ class JwxtClient(
         val rowsFromCourses = runCatching {
             fetchByCourses(termCode)
         }.getOrDefault(emptyList())
-        if (rowsFromCourses.isNotEmpty()) {
-            return@withContext rowsFromCourses.distinct()
-        }
+        val rowsFromScheduleDetail = runCatching {
+            fetchByScheduleDetail(termCode)
+        }.getOrDefault(emptyList())
 
-        val rowsFromScheduleDetail = fetchByScheduleDetail(termCode)
-        if (rowsFromScheduleDetail.isEmpty()) {
+        if (rowsFromCourses.isEmpty() && rowsFromScheduleDetail.isEmpty()) {
             throw IOException("课表为空或解析失败，请确认学期代码和登录状态。")
         }
-        rowsFromScheduleDetail.distinct()
+
+        if (rowsFromCourses.isEmpty()) {
+            return@withContext mergeRowsWithSameCourseSlot(rowsFromScheduleDetail)
+        }
+
+        // `courses.do` 作为主数据源，`getMyScheduleDetail.do` 仅补充实验课(`[实]`前缀)。
+        val experimentRows = rowsFromScheduleDetail.filter { isExperimentCourse(it.courseName) }
+        mergeRowsWithSameCourseSlot(rowsFromCourses + experimentRows)
     }
 
     private fun fetchByScheduleDetail(termCode: String): List<CourseRow> {
@@ -95,7 +101,10 @@ class JwxtClient(
                     )
                 )
             )
-            val arranged = detailResp.optJSONObject("datas")?.optJSONArray("arrangedList") ?: continue
+            val datas = detailResp.optJSONObject("datas")
+            val arranged = datas?.optJSONArray("arrangedList")
+                ?: datas?.optJSONObject("getMyScheduleDetail")?.optJSONArray("arrangedList")
+                ?: continue
             result += parseArrangedList(arranged)
         }
         return result
@@ -151,7 +160,8 @@ class JwxtClient(
             val endSection = item.optInt("endSection", -1)
             if (dayOfWeek <= 0 || beginSection <= 0 || endSection <= 0) continue
 
-            val teacher = stripBrackets(item.optString("weeksAndTeachers").substringAfterLast('/'))
+            val teacherFromWeeksAndTeachers =
+                stripBrackets(item.optString("weeksAndTeachers").substringAfterLast('/'))
             val details = item.optJSONArray("titleDetail")
 
             if (details == null || details.length() <= 1) {
@@ -160,7 +170,7 @@ class JwxtClient(
                     dayOfWeek = dayOfWeek,
                     beginSection = beginSection,
                     endSection = endSection,
-                    teacher = teacher,
+                    teacher = teacherFromWeeksAndTeachers,
                     location = "暂未安排教室",
                     weeks = ""
                 )
@@ -172,6 +182,10 @@ class JwxtClient(
                 if (detail.isEmpty() || !detail.first().isDigit()) continue
                 val parts = detail.split(Regex("\\s+"))
                 val weeksRaw = parts.firstOrNull().orEmpty()
+                val teacherFromDetail = parts.getOrNull(1)
+                    ?.takeIf { !it.endsWith("校区") }
+                    .orEmpty()
+                val teacher = teacherFromWeeksAndTeachers.ifBlank { teacherFromDetail }
                 var location = if (parts.size > 1) parts.last() else "暂未安排教室"
                 location = location.replace("*", "")
                 if (location.endsWith("校区")) location = "暂未安排教室"
@@ -270,6 +284,63 @@ class JwxtClient(
 
     private fun urlEncode(value: String): String {
         return URLEncoder.encode(value, StandardCharsets.UTF_8.toString())
+    }
+
+    private fun isExperimentCourse(courseName: String): Boolean {
+        return courseName.startsWith("[实]")
+    }
+
+    private fun mergeRowsWithSameCourseSlot(rows: List<CourseRow>): List<CourseRow> {
+        data class SlotKey(
+            val courseName: String,
+            val dayOfWeek: Int,
+            val beginSection: Int,
+            val endSection: Int,
+            val location: String,
+            val weeks: String
+        )
+
+        data class SlotAgg(
+            val firstRow: CourseRow,
+            val teachers: LinkedHashSet<String>
+        )
+
+        val slotMap = LinkedHashMap<SlotKey, SlotAgg>()
+        for (row in rows) {
+            val key = SlotKey(
+                courseName = row.courseName,
+                dayOfWeek = row.dayOfWeek,
+                beginSection = row.beginSection,
+                endSection = row.endSection,
+                location = row.location,
+                weeks = row.weeks
+            )
+            val agg = slotMap.getOrPut(key) {
+                SlotAgg(
+                    firstRow = row,
+                    teachers = linkedSetOf()
+                )
+            }
+            splitTeachers(row.teacher).forEach { teacher ->
+                if (teacher.isNotBlank()) agg.teachers += teacher
+            }
+        }
+
+        return slotMap.values.map { agg ->
+            val mergedTeacher = if (agg.teachers.isEmpty()) {
+                agg.firstRow.teacher
+            } else {
+                agg.teachers.joinToString(",")
+            }
+            agg.firstRow.copy(teacher = mergedTeacher)
+        }
+    }
+
+    private fun splitTeachers(raw: String): List<String> {
+        if (raw.isBlank()) return emptyList()
+        return raw.split(Regex("[,，、]"))
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
     }
 
     companion object {
