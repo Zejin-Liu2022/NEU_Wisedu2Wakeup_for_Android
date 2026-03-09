@@ -629,13 +629,14 @@ private fun buildIcs(rows: List<CourseRow>, termCode: String, termStartMillis: L
     val dtFormatter = SimpleDateFormat("yyyyMMdd'T'HHmmss", Locale.US).apply {
         timeZone = tz
     }
-    val baseDate = Calendar.getInstance(tz).apply {
+    val rawTermStart = Calendar.getInstance(tz).apply {
         timeInMillis = termStartMillis
         set(Calendar.HOUR_OF_DAY, 0)
         set(Calendar.MINUTE, 0)
         set(Calendar.SECOND, 0)
         set(Calendar.MILLISECOND, 0)
     }
+    val sundayBaseDate = rawTermStart.toSundayBase()
     val dtStamp = dtFormatter.format(Calendar.getInstance(tz).time)
 
     val sb = StringBuilder()
@@ -657,14 +658,15 @@ private fun buildIcs(rows: List<CourseRow>, termCode: String, termStartMillis: L
         val endClock = sectionEndTime(campus, row.endSection) ?: continue
 
         for (week in weeks) {
-            val startCal = (baseDate.clone() as Calendar).apply {
-                add(Calendar.DAY_OF_YEAR, (week - 1) * 7 + (row.dayOfWeek - 1))
+            val dayOffset = dayOffsetFromSundayBase(row.dayOfWeek)
+            val startCal = (sundayBaseDate.clone() as Calendar).apply {
+                add(Calendar.DAY_OF_YEAR, (week - 1) * 7 + dayOffset)
                 set(Calendar.HOUR_OF_DAY, startClock.hour)
                 set(Calendar.MINUTE, startClock.minute)
                 set(Calendar.SECOND, 0)
             }
-            val endCal = (baseDate.clone() as Calendar).apply {
-                add(Calendar.DAY_OF_YEAR, (week - 1) * 7 + (row.dayOfWeek - 1))
+            val endCal = (sundayBaseDate.clone() as Calendar).apply {
+                add(Calendar.DAY_OF_YEAR, (week - 1) * 7 + dayOffset)
                 set(Calendar.HOUR_OF_DAY, endClock.hour)
                 set(Calendar.MINUTE, endClock.minute)
                 set(Calendar.SECOND, 0)
@@ -696,6 +698,19 @@ private fun buildIcs(rows: List<CourseRow>, termCode: String, termStartMillis: L
 
     sb.append("END:VCALENDAR\r\n")
     return sb.toString()
+}
+
+private fun Calendar.toSundayBase(): Calendar {
+    val result = (clone() as Calendar)
+    val day = result.get(Calendar.DAY_OF_WEEK)
+    val offsetToSunday = -((day - Calendar.SUNDAY + 7) % 7)
+    result.add(Calendar.DAY_OF_YEAR, offsetToSunday)
+    return result
+}
+
+private fun dayOffsetFromSundayBase(dayOfWeek: Int): Int {
+    val normalized = ((dayOfWeek - 1) % 7 + 7) % 7 + 1
+    return normalized % 7
 }
 
 private fun parseWeekNumbers(weeksText: String): List<Int> {
