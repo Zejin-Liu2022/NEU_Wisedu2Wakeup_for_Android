@@ -48,6 +48,11 @@ import com.jasonliu.neu_wisedu2wakeup_for_android.ui.theme.NEU_Wisedu2Wakeup_for
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
+import java.util.TimeZone
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,6 +76,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
     var rows by remember { mutableStateOf<List<CourseRow>>(emptyList()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var savingCsvContent by remember { mutableStateOf<String?>(null) }
+    var savingIcsContent by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
     var detectingNetwork by remember { mutableStateOf(false) }
     var networkConfig by remember { mutableStateOf<NetworkConfig?>(null) }
@@ -144,6 +150,47 @@ fun AppScreen(modifier: Modifier = Modifier) {
                 }
             }.onFailure { e ->
                 status = "CSV 导出失败：${e.message}"
+            }
+        }
+    }
+
+    val exportIcsLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { activityResult ->
+        val uri = activityResult.data?.data
+        if (activityResult.resultCode != Activity.RESULT_OK || uri == null || savingIcsContent == null) {
+            status = "已取消导出。"
+            return@rememberLauncherForActivityResult
+        }
+        val icsToSave = savingIcsContent.orEmpty()
+        val grantFlags = activityResult.data?.flags ?: 0
+        scope.launch {
+            val saveResult = runCatching {
+                val persistableFlags = grantFlags and
+                    (Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                if (persistableFlags != 0) {
+                    context.contentResolver.takePersistableUriPermission(uri, persistableFlags)
+                }
+                withContext(Dispatchers.IO) {
+                    context.contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(icsToSave.toByteArray())
+                    } ?: error("无法写入文件。")
+                }
+            }
+            saveResult.onSuccess {
+                val opened = openFileWithChooser(
+                    context = context,
+                    uri = uri,
+                    mimeType = "text/calendar",
+                    chooserTitle = "选择应用打开课表 ICS"
+                )
+                status = if (opened) {
+                    "ICS 导出成功，已弹出打开方式。"
+                } else {
+                    "ICS 导出成功，但没有可打开 ICS 的应用。"
+                }
+            }.onFailure { e ->
+                status = "ICS 导出失败：${e.message}"
             }
         }
     }
@@ -276,6 +323,57 @@ fun AppScreen(modifier: Modifier = Modifier) {
                 ) {
                     Text("获取课表")
                 }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        val localClient = client
+                        if (localClient == null) {
+                            status = "网络模式未就绪，请先检测网络。"
+                            return@Button
+                        }
+                        if (rows.isEmpty()) {
+                            status = "当前没有可导出的课表数据。"
+                            return@Button
+                        }
+                        val selectedTermCode = termCode.trim()
+                        if (selectedTermCode.isBlank()) {
+                            status = "请先填写学期代码，或先点“检测登录状态”自动填充。"
+                            return@Button
+                        }
+                        loading = true
+                        scope.launch {
+                            val result = runCatching {
+                                val termStartMillis = localClient.fetchTermStartMillis(selectedTermCode)
+                                buildIcs(
+                                    rows = rows,
+                                    termCode = selectedTermCode,
+                                    termStartMillis = termStartMillis
+                                )
+                            }
+                            result.onSuccess { icsContent ->
+                                savingIcsContent = icsContent
+                                exportIcsLauncher.launch(
+                                    buildCreateDocumentIntent(
+                                        fileName = "schedule_$selectedTermCode.ics",
+                                        mimeType = "text/calendar"
+                                    )
+                                )
+                            }.onFailure { e ->
+                                status = "ICS 导出失败：${e.message}"
+                            }
+                            loading = false
+                        }
+                    },
+                    enabled = !loading && networkConfig != null,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Text("导出 ICS")
+                }
                 Button(
                     onClick = {
                         if (rows.isEmpty()) {
@@ -355,9 +453,13 @@ private fun csvEscapeMinimal(value: String): String {
 }
 
 private fun buildCreateCsvIntent(fileName: String): Intent {
+    return buildCreateDocumentIntent(fileName = fileName, mimeType = "text/csv")
+}
+
+private fun buildCreateDocumentIntent(fileName: String, mimeType: String): Intent {
     return Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
         addCategory(Intent.CATEGORY_OPENABLE)
-        type = "text/csv"
+        type = mimeType
         putExtra(Intent.EXTRA_TITLE, fileName)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             putExtra(
@@ -377,11 +479,25 @@ private fun statusColorForMessage(status: String): Color {
 }
 
 private fun openCsvWithChooser(context: Context, uri: Uri): Boolean {
+    return openFileWithChooser(
+        context = context,
+        uri = uri,
+        mimeType = "text/csv",
+        chooserTitle = "选择应用打开课程表 CSV"
+    )
+}
+
+private fun openFileWithChooser(
+    context: Context,
+    uri: Uri,
+    mimeType: String,
+    chooserTitle: String
+): Boolean {
     val viewIntent = Intent(Intent.ACTION_VIEW).apply {
-        setDataAndType(uri, "text/csv")
+        setDataAndType(uri, mimeType)
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
-    val chooser = Intent.createChooser(viewIntent, "选择应用打开课程表 CSV").apply {
+    val chooser = Intent.createChooser(viewIntent, chooserTitle).apply {
         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     }
     return try {
@@ -391,3 +507,165 @@ private fun openCsvWithChooser(context: Context, uri: Uri): Boolean {
         false
     }
 }
+
+private data class ClockTime(val hour: Int, val minute: Int)
+
+private fun buildIcs(rows: List<CourseRow>, termCode: String, termStartMillis: Long): String {
+    val tz = TimeZone.getTimeZone("Asia/Shanghai")
+    val dtFormatter = SimpleDateFormat("yyyyMMdd'T'HHmmss", Locale.US).apply {
+        timeZone = tz
+    }
+    val baseDate = Calendar.getInstance(tz).apply {
+        timeInMillis = termStartMillis
+        set(Calendar.HOUR_OF_DAY, 0)
+        set(Calendar.MINUTE, 0)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }
+    val dtStamp = dtFormatter.format(Calendar.getInstance(tz).time)
+
+    val sb = StringBuilder()
+    sb.append("BEGIN:VCALENDAR\r\n")
+    sb.append("VERSION:2.0\r\n")
+    sb.append("PRODID:-//NEU_Wisedu2Wakeup_for_Android//Schedule//CN\r\n")
+    sb.append("CALSCALE:GREGORIAN\r\n")
+    sb.append("METHOD:PUBLISH\r\n")
+    sb.append("X-WR-TIMEZONE:Asia/Shanghai\r\n")
+    sb.append("X-WR-CALNAME:${escapeIcsText("NEU课程表-$termCode")}\r\n")
+
+    var eventCount = 0
+    for (row in rows) {
+        val weeks = parseWeekNumbers(row.weeks)
+        if (weeks.isEmpty()) continue
+
+        val campus = resolveCampus(row)
+        val startClock = sectionStartTime(campus, row.beginSection) ?: continue
+        val endClock = sectionEndTime(campus, row.endSection) ?: continue
+
+        for (week in weeks) {
+            val startCal = (baseDate.clone() as Calendar).apply {
+                add(Calendar.DAY_OF_YEAR, (week - 1) * 7 + (row.dayOfWeek - 1))
+                set(Calendar.HOUR_OF_DAY, startClock.hour)
+                set(Calendar.MINUTE, startClock.minute)
+                set(Calendar.SECOND, 0)
+            }
+            val endCal = (baseDate.clone() as Calendar).apply {
+                add(Calendar.DAY_OF_YEAR, (week - 1) * 7 + (row.dayOfWeek - 1))
+                set(Calendar.HOUR_OF_DAY, endClock.hour)
+                set(Calendar.MINUTE, endClock.minute)
+                set(Calendar.SECOND, 0)
+            }
+
+            val uid = "${UUID.randomUUID()}@neu-wisedu2wakeup"
+            val summary = escapeIcsText(row.courseName)
+            val location = escapeIcsText(row.location)
+            val description = escapeIcsText(
+                "老师: ${row.teacher}\n周数: ${row.weeks}\n节次: ${row.beginSection}-${row.endSection}\n校区: $campus"
+            )
+
+            sb.append("BEGIN:VEVENT\r\n")
+            sb.append("UID:$uid\r\n")
+            sb.append("DTSTAMP:$dtStamp\r\n")
+            sb.append("DTSTART:${dtFormatter.format(startCal.time)}\r\n")
+            sb.append("DTEND:${dtFormatter.format(endCal.time)}\r\n")
+            sb.append("SUMMARY:$summary\r\n")
+            sb.append("LOCATION:$location\r\n")
+            sb.append("DESCRIPTION:$description\r\n")
+            sb.append("END:VEVENT\r\n")
+            eventCount++
+        }
+    }
+
+    if (eventCount == 0) {
+        throw IllegalStateException("没有可导出的 ICS 事件，请检查周数字段。")
+    }
+
+    sb.append("END:VCALENDAR\r\n")
+    return sb.toString()
+}
+
+private fun parseWeekNumbers(weeksText: String): List<Int> {
+    if (weeksText.isBlank()) return emptyList()
+    val result = linkedSetOf<Int>()
+    val tokens = weeksText.split("、").map { it.trim() }.filter { it.isNotBlank() }
+    for (token in tokens) {
+        var normalized = token.replace("周", "").trim()
+        val oddOnly = normalized.endsWith("单")
+        val evenOnly = normalized.endsWith("双")
+        if (oddOnly || evenOnly) {
+            normalized = normalized.dropLast(1)
+        }
+        val numbers = Regex("\\d+").findAll(normalized).map { it.value.toInt() }.toList()
+        if (numbers.isEmpty()) continue
+        val candidates = if (numbers.size >= 2) {
+            (numbers[0]..numbers[1]).toList()
+        } else {
+            listOf(numbers[0])
+        }
+        candidates.forEach { week ->
+            if (oddOnly && week % 2 == 0) return@forEach
+            if (evenOnly && week % 2 != 0) return@forEach
+            result += week
+        }
+    }
+    return result.toList().sorted()
+}
+
+private fun resolveCampus(row: CourseRow): String {
+    if (row.campus.isNotBlank()) return row.campus
+    return when {
+        row.location.contains("南湖") -> "南湖校区"
+        row.location.contains("浑南") -> "浑南校区"
+        else -> "浑南校区"
+    }
+}
+
+private fun sectionStartTime(campus: String, section: Int): ClockTime? {
+    val isNanhu = campus.contains("南湖")
+    val table = if (isNanhu) SECTION_TIME_NANHU else SECTION_TIME_HUNNAN
+    return table[section]?.first
+}
+
+private fun sectionEndTime(campus: String, section: Int): ClockTime? {
+    val isNanhu = campus.contains("南湖")
+    val table = if (isNanhu) SECTION_TIME_NANHU else SECTION_TIME_HUNNAN
+    return table[section]?.second
+}
+
+private fun escapeIcsText(raw: String): String {
+    return raw
+        .replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\n", "\\n")
+}
+
+private val SECTION_TIME_NANHU = mapOf(
+    1 to (ClockTime(8, 0) to ClockTime(8, 45)),
+    2 to (ClockTime(8, 55) to ClockTime(9, 40)),
+    3 to (ClockTime(10, 0) to ClockTime(10, 45)),
+    4 to (ClockTime(10, 55) to ClockTime(11, 40)),
+    5 to (ClockTime(14, 0) to ClockTime(14, 45)),
+    6 to (ClockTime(14, 55) to ClockTime(15, 40)),
+    7 to (ClockTime(16, 0) to ClockTime(16, 45)),
+    8 to (ClockTime(16, 55) to ClockTime(17, 40)),
+    9 to (ClockTime(18, 30) to ClockTime(19, 15)),
+    10 to (ClockTime(19, 25) to ClockTime(20, 10)),
+    11 to (ClockTime(20, 20) to ClockTime(21, 5)),
+    12 to (ClockTime(21, 15) to ClockTime(22, 0))
+)
+
+private val SECTION_TIME_HUNNAN = mapOf(
+    1 to (ClockTime(8, 30) to ClockTime(9, 15)),
+    2 to (ClockTime(9, 25) to ClockTime(10, 10)),
+    3 to (ClockTime(10, 30) to ClockTime(11, 15)),
+    4 to (ClockTime(11, 25) to ClockTime(12, 10)),
+    5 to (ClockTime(14, 0) to ClockTime(14, 45)),
+    6 to (ClockTime(14, 55) to ClockTime(15, 40)),
+    7 to (ClockTime(16, 0) to ClockTime(16, 45)),
+    8 to (ClockTime(16, 55) to ClockTime(17, 40)),
+    9 to (ClockTime(18, 30) to ClockTime(19, 15)),
+    10 to (ClockTime(19, 25) to ClockTime(20, 10)),
+    11 to (ClockTime(20, 20) to ClockTime(21, 5)),
+    12 to (ClockTime(21, 15) to ClockTime(22, 0))
+)
