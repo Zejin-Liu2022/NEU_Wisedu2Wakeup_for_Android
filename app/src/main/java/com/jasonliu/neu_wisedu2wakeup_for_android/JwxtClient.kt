@@ -186,7 +186,14 @@ class JwxtClient(
                     ?.takeIf { !it.endsWith("校区") }
                     .orEmpty()
                 val teacher = teacherFromWeeksAndTeachers.ifBlank { teacherFromDetail }
-                var location = if (parts.size > 1) parts.last() else "暂未安排教室"
+                val rawLocation = when {
+                    parts.size <= 1 -> "暂未安排教室"
+                    isExperimentCourse(courseName) &&
+                        parts.size >= 2 &&
+                        isExperimentClassMarker(parts.last()) -> parts[parts.size - 2]
+                    else -> parts.last()
+                }
+                var location = rawLocation
                 location = location.replace("*", "")
                 if (location.endsWith("校区")) location = "暂未安排教室"
                 if (location == "停课") continue
@@ -341,6 +348,10 @@ class JwxtClient(
         return raw.split(Regex("[,，、]"))
             .map { it.trim() }
             .filter { it.isNotBlank() }
+    }
+
+    private fun isExperimentClassMarker(value: String): Boolean {
+        return value.contains("实验班")
     }
 
     companion object {
