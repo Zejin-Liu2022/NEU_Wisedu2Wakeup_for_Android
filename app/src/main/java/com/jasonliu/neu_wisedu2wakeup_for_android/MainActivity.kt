@@ -17,6 +17,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,7 +33,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
@@ -41,8 +50,12 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.jasonliu.neu_wisedu2wakeup_for_android.ui.theme.NEU_Wisedu2Wakeup_for_AndroidTheme
 import kotlinx.coroutines.Dispatchers
@@ -66,6 +79,12 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private enum class GuideStep {
+    NONE,
+    NEED_LOGIN,
+    NEED_FETCH
+}
+
 @Composable
 fun AppScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -80,6 +99,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
     var loading by remember { mutableStateOf(false) }
     var detectingNetwork by remember { mutableStateOf(false) }
     var networkConfig by remember { mutableStateOf<NetworkConfig?>(null) }
+    var guideStep by remember { mutableStateOf(GuideStep.NONE) }
 
     val client = remember(networkConfig) {
         networkConfig?.let { config ->
@@ -104,10 +124,12 @@ fun AppScreen(modifier: Modifier = Modifier) {
             result.onSuccess { config ->
                 networkConfig = config
                 status = "网络检测完成：${config.modeLabel}。请在下方官方页面完成登录。登录完成后，请点击检测登录状态来确认登录结果。"
+                guideStep = GuideStep.NEED_LOGIN
                 webView?.loadUrl(config.loginUrl)
             }.onFailure { e ->
                 networkConfig = null
                 status = "网络检测失败：${e.message}"
+                guideStep = GuideStep.NONE
             }
             detectingNetwork = false
         }
@@ -256,12 +278,13 @@ fun AppScreen(modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(
+                GuidePulseButton(
+                    text = "检测登录状态",
                     onClick = {
                         val localClient = client
                         if (localClient == null) {
                             status = "网络模式未就绪，请先检测网络。"
-                            return@Button
+                            return@GuidePulseButton
                         }
                         loading = true
                         scope.launch {
@@ -271,6 +294,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
                                 if (termCode.isBlank() && user.defaultTermCode.isNotBlank()) {
                                     termCode = user.defaultTermCode
                                 }
+                                guideStep = GuideStep.NEED_FETCH
                                 status = buildString {
                                     append("登录有效。")
                                     if (user.termName.isNotBlank() && user.defaultTermCode.isNotBlank()) {
@@ -279,32 +303,33 @@ fun AppScreen(modifier: Modifier = Modifier) {
                                 }
                             }.onFailure { e ->
                                 status = "登录状态检查失败：${e.message}"
+                                guideStep = GuideStep.NEED_LOGIN
                             }
                             loading = false
                         }
                     },
                     enabled = !loading && networkConfig != null,
+                    highlight = guideStep == GuideStep.NEED_LOGIN,
                     modifier = Modifier.weight(1f)
-                ) {
-                    Text("检测登录状态")
-                }
+                )
             }
 
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Button(
+                GuidePulseButton(
+                    text = "获取课表",
                     onClick = {
                         val localClient = client
                         if (localClient == null) {
                             status = "网络模式未就绪，请先检测网络。"
-                            return@Button
+                            return@GuidePulseButton
                         }
                         val selectedTermCode = termCode.trim()
                         if (selectedTermCode.isBlank()) {
                             status = "请先填写学期代码，或先点“检测登录状态”自动填充。"
-                            return@Button
+                            return@GuidePulseButton
                         }
                         loading = true
                         scope.launch {
@@ -312,6 +337,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
                             result.onSuccess { fetchedRows ->
                                 rows = fetchedRows
                                 status = "课表获取完成，共 ${fetchedRows.size} 条课程记录。"
+                                guideStep = GuideStep.NONE
                             }.onFailure { e ->
                                 status = "课表获取失败：${e.message}"
                             }
@@ -319,10 +345,9 @@ fun AppScreen(modifier: Modifier = Modifier) {
                         }
                     },
                     enabled = !loading,
+                    highlight = guideStep == GuideStep.NEED_FETCH,
                     modifier = Modifier.weight(1f)
-                ) {
-                    Text("获取课表")
-                }
+                )
             }
 
             Row(
@@ -400,31 +425,120 @@ fun AppScreen(modifier: Modifier = Modifier) {
 
             Spacer(modifier = Modifier.height(4.dp))
             HorizontalDivider()
-            Text("官方登录页")
-            val config = networkConfig
-            if (config == null) {
-                Text("无法初始化登录页，请先完成网络检测。")
-            } else {
-                key(config.mode) {
-                    AndroidView(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f),
-                        factory = { ctx ->
-                            WebView(ctx).apply {
-                                settings.javaScriptEnabled = true
-                                settings.domStorageEnabled = true
-                                settings.javaScriptCanOpenWindowsAutomatically = true
-                                webViewClient = WebViewClient()
-                                webChromeClient = WebChromeClient()
-                                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                                loadUrl(config.loginUrl)
-                            }.also { webView = it }
+            GuideHalo(
+                highlight = guideStep == GuideStep.NEED_LOGIN,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                cornerRadius = 12.dp
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("官方登录页")
+                    val config = networkConfig
+                    if (config == null) {
+                        Text("无法初始化登录页，请先完成网络检测。")
+                    } else {
+                        key(config.mode) {
+                            AndroidView(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f),
+                                factory = { ctx ->
+                                    WebView(ctx).apply {
+                                        settings.javaScriptEnabled = true
+                                        settings.domStorageEnabled = true
+                                        settings.javaScriptCanOpenWindowsAutomatically = true
+                                        webViewClient = WebViewClient()
+                                        webChromeClient = WebChromeClient()
+                                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                                        loadUrl(config.loginUrl)
+                                    }.also { webView = it }
+                                }
+                            )
                         }
-                    )
+                    }
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun GuideHalo(
+    highlight: Boolean,
+    modifier: Modifier = Modifier,
+    cornerRadius: Dp = 16.dp,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(cornerRadius),
+    content: @Composable () -> Unit
+) {
+    if (!highlight) {
+        Box(modifier = modifier) {
+            content()
+        }
+        return
+    }
+
+    val transition = rememberInfiniteTransition(label = "guide-halo")
+    val alpha by transition.animateFloat(
+        initialValue = 0.30f,
+        targetValue = 0.90f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "halo-alpha"
+    )
+    Box(
+        modifier = modifier
+            .border(
+                width = 2.dp,
+                color = GUIDE_HALO_COLOR.copy(alpha = alpha),
+                shape = shape
+            )
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun GuidePulseButton(
+    text: String,
+    onClick: () -> Unit,
+    enabled: Boolean,
+    highlight: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val baseColor = MaterialTheme.colorScheme.primary
+    val containerColor = if (highlight) {
+        val transition = rememberInfiniteTransition(label = "guide-button-pulse")
+        val pulse by transition.animateFloat(
+            initialValue = 0.05f,
+            targetValue = 0.35f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 1200),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "button-pulse"
+        )
+        lerp(baseColor, GUIDE_HALO_COLOR, pulse)
+    } else {
+        baseColor
+    }
+
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = containerColor
+        )
+    ) {
+        Text(text)
     }
 }
 
@@ -639,6 +753,8 @@ private fun escapeIcsText(raw: String): String {
         .replace(",", "\\,")
         .replace("\n", "\\n")
 }
+
+private val GUIDE_HALO_COLOR = Color(0xFF1E88E5)
 
 private val SECTION_TIME_NANHU = mapOf(
     1 to (ClockTime(8, 0) to ClockTime(8, 45)),
