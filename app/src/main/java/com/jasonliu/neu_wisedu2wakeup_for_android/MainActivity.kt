@@ -100,6 +100,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
     var detectingNetwork by remember { mutableStateOf(false) }
     var networkConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     var guideStep by remember { mutableStateOf(GuideStep.NONE) }
+    var showLoginPage by remember { mutableStateOf(true) }
 
     val client = remember(networkConfig) {
         networkConfig?.let { config ->
@@ -125,6 +126,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
                 networkConfig = config
                 status = "网络检测完成：${config.modeLabel}。请在下方官方页面完成登录。登录完成后，请点击检测登录状态来确认登录结果。"
                 guideStep = GuideStep.NEED_LOGIN
+                showLoginPage = true
                 webView?.loadUrl(config.loginUrl)
             }.onFailure { e ->
                 networkConfig = null
@@ -265,6 +267,8 @@ fun AppScreen(modifier: Modifier = Modifier) {
                 Button(
                     onClick = {
                         val config = networkConfig ?: return@Button
+                        showLoginPage = true
+                        guideStep = GuideStep.NEED_LOGIN
                         webView?.loadUrl(config.loginUrl)
                     },
                     enabled = networkConfig != null && !loading,
@@ -295,6 +299,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
                                     termCode = user.defaultTermCode
                                 }
                                 guideStep = GuideStep.NEED_FETCH
+                                showLoginPage = false
                                 status = buildString {
                                     append("登录有效。")
                                     if (user.termName.isNotBlank() && user.defaultTermCode.isNotBlank()) {
@@ -304,6 +309,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
                             }.onFailure { e ->
                                 status = "登录状态检查失败：${e.message}"
                                 guideStep = GuideStep.NEED_LOGIN
+                                showLoginPage = true
                             }
                             loading = false
                         }
@@ -367,7 +373,7 @@ fun AppScreen(modifier: Modifier = Modifier) {
                         }
                         val selectedTermCode = termCode.trim()
                         if (selectedTermCode.isBlank()) {
-                            status = "请先填写学期代码，或先点“检测登录状态”自动填充。"
+                            status = "请先填写学期代码，或先点“检测登录状态”自动填充当前学期。"
                             return@Button
                         }
                         loading = true
@@ -423,43 +429,45 @@ fun AppScreen(modifier: Modifier = Modifier) {
                 Text("正在检测网络...")
             }
 
-            Spacer(modifier = Modifier.height(4.dp))
-            HorizontalDivider()
-            GuideHalo(
-                highlight = guideStep == GuideStep.NEED_LOGIN,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f),
-                cornerRadius = 12.dp
-            ) {
-                Column(
+            if (showLoginPage) {
+                Spacer(modifier = Modifier.height(4.dp))
+                HorizontalDivider()
+                GuideHalo(
+                    highlight = guideStep == GuideStep.NEED_LOGIN,
                     modifier = Modifier
-                        .fillMaxSize()
-                        .padding(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                        .fillMaxWidth()
+                        .weight(1f),
+                    cornerRadius = 12.dp
                 ) {
-                    Text("官方登录页")
-                    val config = networkConfig
-                    if (config == null) {
-                        Text("无法初始化登录页，请先完成网络检测。")
-                    } else {
-                        key(config.mode) {
-                            AndroidView(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .weight(1f),
-                                factory = { ctx ->
-                                    WebView(ctx).apply {
-                                        settings.javaScriptEnabled = true
-                                        settings.domStorageEnabled = true
-                                        settings.javaScriptCanOpenWindowsAutomatically = true
-                                        webViewClient = WebViewClient()
-                                        webChromeClient = WebChromeClient()
-                                        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-                                        loadUrl(config.loginUrl)
-                                    }.also { webView = it }
-                                }
-                            )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text("官方登录页")
+                        val config = networkConfig
+                        if (config == null) {
+                            Text("无法初始化登录页，请先完成网络检测。")
+                        } else {
+                            key(config.mode) {
+                                AndroidView(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .weight(1f),
+                                    factory = { ctx ->
+                                        WebView(ctx).apply {
+                                            settings.javaScriptEnabled = true
+                                            settings.domStorageEnabled = true
+                                            settings.javaScriptCanOpenWindowsAutomatically = true
+                                            webViewClient = WebViewClient()
+                                            webChromeClient = WebChromeClient()
+                                            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                                            loadUrl(config.loginUrl)
+                                        }.also { webView = it }
+                                    }
+                                )
+                            }
                         }
                     }
                 }
