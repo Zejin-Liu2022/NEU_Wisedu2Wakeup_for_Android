@@ -7,7 +7,10 @@ import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.text.SimpleDateFormat
 import java.nio.charset.StandardCharsets
+import java.util.Locale
+import java.util.TimeZone
 
 data class CurrentUser(
     val userName: String,
@@ -23,7 +26,8 @@ data class CourseRow(
     val endSection: Int,
     val teacher: String,
     val location: String,
-    val weeks: String
+    val weeks: String,
+    val campus: String
 )
 
 class JwxtClient(
@@ -63,9 +67,39 @@ class JwxtClient(
             return@withContext mergeRowsWithSameCourseSlot(rowsFromScheduleDetail)
         }
 
+        val campusBySlot = rowsFromScheduleDetail
+            .filter { it.campus.isNotBlank() }
+            .associateBy(
+                keySelector = { slotKeyOf(it) },
+                valueTransform = { it.campus }
+            )
+        val enrichedRowsFromCourses = rowsFromCourses.map { row ->
+            val campus = row.campus.ifBlank { campusBySlot[slotKeyOf(row)].orEmpty() }
+            if (campus == row.campus) row else row.copy(campus = campus)
+        }
+
         // `courses.do` 作为主数据源，`getMyScheduleDetail.do` 仅补充实验课(`[实]`前缀)。
         val experimentRows = rowsFromScheduleDetail.filter { isExperimentCourse(it.courseName) }
-        mergeRowsWithSameCourseSlot(rowsFromCourses + experimentRows)
+        mergeRowsWithSameCourseSlot(enrichedRowsFromCourses + experimentRows)
+    }
+
+    suspend fun fetchTermStartMillis(termCode: String): Long = withContext(Dispatchers.IO) {
+        val response = requestJson(
+            method = "GET",
+            path = "/jwapp/sys/homeapp/api/home/getTermWeeks.do?termCode=$termCode"
+        )
+        val startDate = response.optJSONArray("datas")
+            ?.optJSONObject(0)
+            ?.optString("startDate")
+            .orEmpty()
+        if (startDate.isBlank()) {
+            throw IOException("未获取到学期起始日期。")
+        }
+        val parser = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).apply {
+            timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+        }
+        parser.parse(startDate)?.time
+            ?: throw IOException("学期起始日期解析失败：$startDate")
     }
 
     private fun fetchByScheduleDetail(termCode: String): List<CourseRow> {
@@ -142,7 +176,8 @@ class JwxtClient(
                     endSection = sectionPair.second,
                     teacher = stripBrackets(parts[3]),
                     location = location,
-                    weeks = normalizeWeeks(stripBrackets(parts[0]))
+                    weeks = normalizeWeeks(stripBrackets(parts[0])),
+                    campus = ""
                 )
             }
         }
@@ -163,6 +198,7 @@ class JwxtClient(
             val teacherFromWeeksAndTeachers =
                 stripBrackets(item.optString("weeksAndTeachers").substringAfterLast('/'))
             val details = item.optJSONArray("titleDetail")
+            val campusFromItem = item.optString("campusName")
 
             if (details == null || details.length() <= 1) {
                 result += CourseRow(
@@ -172,7 +208,8 @@ class JwxtClient(
                     endSection = endSection,
                     teacher = teacherFromWeeksAndTeachers,
                     location = "暂未安排教室",
-                    weeks = ""
+                    weeks = "",
+                    campus = campusFromItem
                 )
                 continue
             }
@@ -186,13 +223,12 @@ class JwxtClient(
                     ?.takeIf { !it.endsWith("校区") }
                     .orEmpty()
                 val teacher = teacherFromWeeksAndTeachers.ifBlank { teacherFromDetail }
-                val rawLocation = when {
-                    parts.size <= 1 -> "暂未安排教室"
-                    isExperimentCourse(courseName) &&
-                        parts.size >= 2 &&
-                        isExperimentClassMarker(parts.last()) -> parts[parts.size - 2]
-                    else -> parts.last()
-                }
+                val campusFromDetail = extractCampusFromParts(parts).ifBlank { campusFromItem }
+                val rawLocation = extractLocationFromParts(
+                    courseName = courseName,
+                    parts = parts,
+                    campus = campusFromDetail
+                )
                 var location = rawLocation
                 location = location.replace("*", "")
                 if (location.endsWith("校区")) location = "暂未安排教室"
@@ -205,7 +241,8 @@ class JwxtClient(
                     endSection = endSection,
                     teacher = teacher,
                     location = location,
-                    weeks = normalizeWeeks(weeksRaw)
+                    weeks = normalizeWeeks(weeksRaw),
+                    campus = campusFromDetail
                 )
             }
         }
@@ -297,39 +334,72 @@ class JwxtClient(
         return courseName.startsWith("[实]")
     }
 
+    private data class SlotKey(
+        val courseName: String,
+        val dayOfWeek: Int,
+        val beginSection: Int,
+        val endSection: Int,
+        val location: String,
+        val weeks: String
+    )
+
+    private data class SlotAgg(
+        val firstRow: CourseRow,
+        val teachers: LinkedHashSet<String>,
+        val campuses: LinkedHashSet<String>
+    )
+
+    private fun slotKeyOf(row: CourseRow): SlotKey {
+        return SlotKey(
+            courseName = row.courseName,
+            dayOfWeek = row.dayOfWeek,
+            beginSection = row.beginSection,
+            endSection = row.endSection,
+            location = row.location,
+            weeks = row.weeks
+        )
+    }
+
+    private fun extractCampusFromParts(parts: List<String>): String {
+        return parts.firstOrNull { it.endsWith("校区") }.orEmpty()
+    }
+
+    private fun extractLocationFromParts(courseName: String, parts: List<String>, campus: String): String {
+        if (parts.isEmpty()) return "暂未安排教室"
+
+        val campusIndex = if (campus.isBlank()) -1 else parts.indexOf(campus)
+        val lastIndex = parts.lastIndex
+
+        if (isExperimentCourse(courseName) &&
+            lastIndex >= 1 &&
+            isExperimentClassMarker(parts[lastIndex])
+        ) {
+            val candidateIndex = (lastIndex - 1).coerceAtLeast(0)
+            return parts[candidateIndex]
+        }
+
+        if (campusIndex >= 0 && campusIndex < lastIndex) {
+            return parts[campusIndex + 1]
+        }
+        return parts[lastIndex]
+    }
+
     private fun mergeRowsWithSameCourseSlot(rows: List<CourseRow>): List<CourseRow> {
-        data class SlotKey(
-            val courseName: String,
-            val dayOfWeek: Int,
-            val beginSection: Int,
-            val endSection: Int,
-            val location: String,
-            val weeks: String
-        )
-
-        data class SlotAgg(
-            val firstRow: CourseRow,
-            val teachers: LinkedHashSet<String>
-        )
-
         val slotMap = LinkedHashMap<SlotKey, SlotAgg>()
         for (row in rows) {
-            val key = SlotKey(
-                courseName = row.courseName,
-                dayOfWeek = row.dayOfWeek,
-                beginSection = row.beginSection,
-                endSection = row.endSection,
-                location = row.location,
-                weeks = row.weeks
-            )
+            val key = slotKeyOf(row)
             val agg = slotMap.getOrPut(key) {
                 SlotAgg(
                     firstRow = row,
-                    teachers = linkedSetOf()
+                    teachers = linkedSetOf(),
+                    campuses = linkedSetOf()
                 )
             }
             splitTeachers(row.teacher).forEach { teacher ->
                 if (teacher.isNotBlank()) agg.teachers += teacher
+            }
+            if (row.campus.isNotBlank()) {
+                agg.campuses += row.campus
             }
         }
 
@@ -339,7 +409,15 @@ class JwxtClient(
             } else {
                 agg.teachers.joinToString(",")
             }
-            agg.firstRow.copy(teacher = mergedTeacher)
+            val mergedCampus = if (agg.campuses.isEmpty()) {
+                agg.firstRow.campus
+            } else {
+                agg.campuses.first()
+            }
+            agg.firstRow.copy(
+                teacher = mergedTeacher,
+                campus = mergedCampus
+            )
         }
     }
 
