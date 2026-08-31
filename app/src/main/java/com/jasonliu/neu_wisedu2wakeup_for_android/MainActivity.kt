@@ -23,6 +23,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -37,8 +38,11 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -53,6 +57,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.unit.Dp
@@ -85,6 +90,17 @@ private enum class GuideStep {
     NEED_FETCH
 }
 
+private enum class ExportFormat {
+    CSV,
+    ICS
+}
+
+private enum class ExportContent(val label: String) {
+    SCHEDULE_ONLY("仅课表"),
+    SCHEDULE_AND_EXAMS("课表+考试"),
+    EXAMS_ONLY("仅考试")
+}
+
 @Composable
 fun AppScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -92,7 +108,8 @@ fun AppScreen(modifier: Modifier = Modifier) {
     var status by remember { mutableStateOf("正在检测网络模式...") }
     var currentUser by remember { mutableStateOf<CurrentUser?>(null) }
     var termCode by remember { mutableStateOf("") }
-    var rows by remember { mutableStateOf<List<CourseRow>>(emptyList()) }
+    var scheduleRows by remember { mutableStateOf<List<CourseRow>>(emptyList()) }
+    var examRows by remember { mutableStateOf<List<CourseRow>>(emptyList()) }
     var webView by remember { mutableStateOf<WebView?>(null) }
     var savingCsvContent by remember { mutableStateOf<String?>(null) }
     var savingIcsContent by remember { mutableStateOf<String?>(null) }
@@ -101,6 +118,9 @@ fun AppScreen(modifier: Modifier = Modifier) {
     var networkConfig by remember { mutableStateOf<NetworkConfig?>(null) }
     var guideStep by remember { mutableStateOf(GuideStep.NONE) }
     var showLoginPage by remember { mutableStateOf(true) }
+    var showExportDialog by remember { mutableStateOf(false) }
+    var exportFormat by remember { mutableStateOf(ExportFormat.CSV) }
+    var exportContent by remember { mutableStateOf(ExportContent.SCHEDULE_ONLY) }
 
     val client = remember(networkConfig) {
         networkConfig?.let { config ->
@@ -339,10 +359,23 @@ fun AppScreen(modifier: Modifier = Modifier) {
                         }
                         loading = true
                         scope.launch {
-                            val result = runCatching { localClient.fetchSchedule(selectedTermCode) }
+                            val result = runCatching {
+                                localClient.fetchSchedule(selectedTermCode) to
+                                    runCatching { localClient.fetchExams(selectedTermCode) }
+                            }
                             result.onSuccess { fetchedRows ->
-                                rows = fetchedRows
-                                status = "课表获取完成，共 ${fetchedRows.size} 条课程记录。"
+                                val fetchedScheduleRows = fetchedRows.first
+                                val examResult = fetchedRows.second
+                                val fetchedExamRows = examResult.getOrDefault(emptyList())
+                                scheduleRows = fetchedScheduleRows
+                                examRows = fetchedExamRows
+                                status = buildString {
+                                    append("课表解析完成，共 ${fetchedScheduleRows.size} 条课程，${fetchedExamRows.size} 条考试。")
+                                    examResult.exceptionOrNull()?.message?.let { message ->
+                                        append(" 考试安排读取失败：")
+                                        append(message)
+                                    }
+                                }
                                 guideStep = GuideStep.NONE
                             }.onFailure { e ->
                                 status = "课表获取失败：${e.message}"
@@ -362,63 +395,26 @@ fun AppScreen(modifier: Modifier = Modifier) {
             ) {
                 Button(
                     onClick = {
-                        val localClient = client
-                        if (localClient == null) {
+                        if (client == null) {
                             status = "网络模式未就绪，请先检测网络。"
                             return@Button
                         }
-                        if (rows.isEmpty()) {
-                            status = "当前没有可导出的课表数据。"
+                        if (scheduleRows.isEmpty() && examRows.isEmpty()) {
+                            status = "当前没有可导出的课表或考试数据。"
                             return@Button
                         }
-                        val selectedTermCode = termCode.trim()
-                        if (selectedTermCode.isBlank()) {
-                            status = "请先填写学期代码，或先点“检测登录状态”自动填充当前学期。"
-                            return@Button
+                        exportFormat = ExportFormat.CSV
+                        exportContent = if (examRows.isNotEmpty()) {
+                            ExportContent.SCHEDULE_AND_EXAMS
+                        } else {
+                            ExportContent.SCHEDULE_ONLY
                         }
-                        loading = true
-                        scope.launch {
-                            val result = runCatching {
-                                val termStartMillis = localClient.fetchTermStartMillis(selectedTermCode)
-                                buildIcs(
-                                    rows = rows,
-                                    termCode = selectedTermCode,
-                                    termStartMillis = termStartMillis
-                                )
-                            }
-                            result.onSuccess { icsContent ->
-                                savingIcsContent = icsContent
-                                exportIcsLauncher.launch(
-                                    buildCreateDocumentIntent(
-                                        fileName = "schedule_$selectedTermCode.ics",
-                                        mimeType = "text/calendar"
-                                    )
-                                )
-                            }.onFailure { e ->
-                                status = "ICS 导出失败：${e.message}"
-                            }
-                            loading = false
-                        }
+                        showExportDialog = true
                     },
                     enabled = !loading && networkConfig != null,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("导出 ICS")
-                }
-                Button(
-                    onClick = {
-                        if (rows.isEmpty()) {
-                            status = "当前没有可导出的课表数据。"
-                            return@Button
-                        }
-                        val selectedTermCode = termCode.trim().ifBlank { "term" }
-                        savingCsvContent = buildCsv(rows)
-                        exportCsvLauncher.launch(buildCreateCsvIntent("schedule_$selectedTermCode.csv"))
-                    },
-                    enabled = !loading && networkConfig != null,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text("导出 CSV")
+                    Text("导出课表")
                 }
             }
 
@@ -473,6 +469,96 @@ fun AppScreen(modifier: Modifier = Modifier) {
                 }
             }
         }
+    }
+
+    if (showExportDialog) {
+        ExportDialog(
+            exportFormat = exportFormat,
+            exportContent = exportContent,
+            hasExams = examRows.isNotEmpty(),
+            onDismiss = { showExportDialog = false },
+            onFormatChange = { newFormat ->
+                exportFormat = newFormat
+                if (newFormat == ExportFormat.CSV && exportContent == ExportContent.EXAMS_ONLY) {
+                    exportContent = if (examRows.isNotEmpty() && scheduleRows.isNotEmpty()) {
+                        ExportContent.SCHEDULE_AND_EXAMS
+                    } else {
+                        ExportContent.SCHEDULE_ONLY
+                    }
+                }
+            },
+            onContentChange = { exportContent = it },
+            onConfirm = {
+                if (exportFormat == ExportFormat.CSV && scheduleRows.isEmpty()) {
+                    status = "CSV 导出至少需要课表数据。"
+                    showExportDialog = false
+                } else {
+                    val selectedRows = buildExportRows(
+                        scheduleRows = scheduleRows,
+                        examRows = examRows,
+                        exportContent = exportContent
+                    )
+                    if (selectedRows.isEmpty()) {
+                        status = "所选导出内容为空。"
+                        showExportDialog = false
+                    } else {
+                        val selectedTermCode = termCode.trim()
+                        if (exportFormat == ExportFormat.ICS && selectedTermCode.isBlank()) {
+                            status = "请先填写学期代码，或先点“检测登录状态”自动填充当前学期。"
+                            showExportDialog = false
+                        } else {
+                            showExportDialog = false
+                            when (exportFormat) {
+                                ExportFormat.CSV -> {
+                                    val fileName = buildExportFileName(
+                                        termCode = selectedTermCode.ifBlank { "term" },
+                                        exportContent = exportContent,
+                                        extension = "csv"
+                                    )
+                                    savingCsvContent = buildCsv(selectedRows)
+                                    exportCsvLauncher.launch(buildCreateCsvIntent(fileName))
+                                }
+
+                                ExportFormat.ICS -> {
+                                    val localClient = client
+                                    if (localClient == null) {
+                                        status = "网络模式未就绪，请先检测网络。"
+                                    } else {
+                                        loading = true
+                                        scope.launch {
+                                            val result = runCatching {
+                                                val termStartMillis = localClient.fetchTermStartMillis(selectedTermCode)
+                                                buildIcs(
+                                                    rows = selectedRows,
+                                                    termCode = selectedTermCode,
+                                                    termStartMillis = termStartMillis
+                                                )
+                                            }
+                                            result.onSuccess { icsContent ->
+                                                savingIcsContent = icsContent
+                                                exportIcsLauncher.launch(
+                                                    buildCreateDocumentIntent(
+                                                        fileName = buildExportFileName(
+                                                            termCode = selectedTermCode,
+                                                            exportContent = exportContent,
+                                                            extension = "ics"
+                                                        ),
+                                                        mimeType = "text/calendar"
+                                                    )
+                                                )
+                                            }.onFailure { e ->
+                                                status = "ICS 导出失败：${e.message}"
+                                            }
+                                            loading = false
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        )
     }
 }
 
@@ -550,6 +636,102 @@ private fun GuidePulseButton(
     }
 }
 
+@Composable
+private fun ExportDialog(
+    exportFormat: ExportFormat,
+    exportContent: ExportContent,
+    hasExams: Boolean,
+    onDismiss: () -> Unit,
+    onFormatChange: (ExportFormat) -> Unit,
+    onContentChange: (ExportContent) -> Unit,
+    onConfirm: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("导出选项") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("导出类型")
+                    ExportOptionRow(
+                        label = "CSV",
+                        selected = exportFormat == ExportFormat.CSV,
+                        enabled = true,
+                        onClick = { onFormatChange(ExportFormat.CSV) }
+                    )
+                    ExportOptionRow(
+                        label = "ICS",
+                        selected = exportFormat == ExportFormat.ICS,
+                        enabled = true,
+                        onClick = { onFormatChange(ExportFormat.ICS) }
+                    )
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("导出内容")
+                    ExportOptionRow(
+                        label = ExportContent.SCHEDULE_ONLY.label,
+                        selected = exportContent == ExportContent.SCHEDULE_ONLY,
+                        enabled = true,
+                        onClick = { onContentChange(ExportContent.SCHEDULE_ONLY) }
+                    )
+                    ExportOptionRow(
+                        label = ExportContent.SCHEDULE_AND_EXAMS.label,
+                        selected = exportContent == ExportContent.SCHEDULE_AND_EXAMS,
+                        enabled = true,
+                        onClick = { onContentChange(ExportContent.SCHEDULE_AND_EXAMS) }
+                    )
+                    ExportOptionRow(
+                        label = ExportContent.EXAMS_ONLY.label,
+                        selected = exportContent == ExportContent.EXAMS_ONLY,
+                        enabled = exportFormat == ExportFormat.ICS && hasExams,
+                        onClick = { onContentChange(ExportContent.EXAMS_ONLY) }
+                    )
+                    if (exportFormat == ExportFormat.CSV) {
+                        Text("CSV 不支持仅考试，避免覆盖 WakeUp 中已有课表。")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("导出")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
+}
+
+@Composable
+private fun ExportOptionRow(
+    label: String,
+    selected: Boolean,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(
+            selected = selected,
+            onClick = onClick,
+            enabled = enabled
+        )
+        Text(
+            text = label,
+            color = if (enabled) Color.Black else Color.Gray
+        )
+    }
+}
+
 private fun buildCsv(rows: List<CourseRow>): String {
     val header = listOf("课程名称", "星期", "开始节数", "结束节数", "老师", "地点", "周数")
     val body = rows.map {
@@ -595,7 +777,7 @@ private fun buildCreateDocumentIntent(fileName: String, mimeType: String): Inten
 private fun statusColorForMessage(status: String): Color {
     return when {
         status.startsWith("课表获取失败") -> Color(0xFFC62828)
-        status.startsWith("课表获取完成") -> Color(0xFF2E7D32)
+        status.startsWith("课表获取完成") || status.startsWith("课表解析完成") -> Color(0xFF2E7D32)
         else -> Color.Black
     }
 }
@@ -629,8 +811,6 @@ private fun openFileWithChooser(
         false
     }
 }
-
-private data class ClockTime(val hour: Int, val minute: Int)
 
 private fun buildIcs(rows: List<CourseRow>, termCode: String, termStartMillis: Long): String {
     val tz = TimeZone.getTimeZone("Asia/Shanghai")
@@ -748,27 +928,6 @@ private fun parseWeekNumbers(weeksText: String): List<Int> {
     return result.toList().sorted()
 }
 
-private fun resolveCampus(row: CourseRow): String {
-    if (row.campus.isNotBlank()) return row.campus
-    return when {
-        row.location.contains("南湖") -> "南湖校区"
-        row.location.contains("浑南") -> "浑南校区"
-        else -> "浑南校区"
-    }
-}
-
-private fun sectionStartTime(campus: String, section: Int): ClockTime? {
-    val isNanhu = campus.contains("南湖")
-    val table = if (isNanhu) SECTION_TIME_NANHU else SECTION_TIME_HUNNAN
-    return table[section]?.first
-}
-
-private fun sectionEndTime(campus: String, section: Int): ClockTime? {
-    val isNanhu = campus.contains("南湖")
-    val table = if (isNanhu) SECTION_TIME_NANHU else SECTION_TIME_HUNNAN
-    return table[section]?.second
-}
-
 private fun escapeIcsText(raw: String): String {
     return raw
         .replace("\\", "\\\\")
@@ -777,34 +936,37 @@ private fun escapeIcsText(raw: String): String {
         .replace("\n", "\\n")
 }
 
+private fun buildExportRows(
+    scheduleRows: List<CourseRow>,
+    examRows: List<CourseRow>,
+    exportContent: ExportContent
+): List<CourseRow> {
+    val rows = when (exportContent) {
+        ExportContent.SCHEDULE_ONLY -> scheduleRows
+        ExportContent.SCHEDULE_AND_EXAMS -> scheduleRows + examRows
+        ExportContent.EXAMS_ONLY -> examRows
+    }
+    return rows.sortedWith(
+        compareBy<CourseRow>(
+            { parseWeekNumbers(it.weeks).firstOrNull() ?: Int.MAX_VALUE },
+            { it.dayOfWeek },
+            { it.beginSection },
+            { it.courseName }
+        )
+    )
+}
+
+private fun buildExportFileName(
+    termCode: String,
+    exportContent: ExportContent,
+    extension: String
+): String {
+    val baseName = when (exportContent) {
+        ExportContent.SCHEDULE_ONLY -> "schedule_$termCode"
+        ExportContent.SCHEDULE_AND_EXAMS -> "schedule_${termCode}_with_exams"
+        ExportContent.EXAMS_ONLY -> "exams_$termCode"
+    }
+    return "$baseName.$extension"
+}
+
 private val GUIDE_HALO_COLOR = Color(0xFF1E88E5)
-
-private val SECTION_TIME_NANHU = mapOf(
-    1 to (ClockTime(8, 0) to ClockTime(8, 45)),
-    2 to (ClockTime(8, 55) to ClockTime(9, 40)),
-    3 to (ClockTime(10, 0) to ClockTime(10, 45)),
-    4 to (ClockTime(10, 55) to ClockTime(11, 40)),
-    5 to (ClockTime(14, 0) to ClockTime(14, 45)),
-    6 to (ClockTime(14, 55) to ClockTime(15, 40)),
-    7 to (ClockTime(16, 0) to ClockTime(16, 45)),
-    8 to (ClockTime(16, 55) to ClockTime(17, 40)),
-    9 to (ClockTime(18, 30) to ClockTime(19, 15)),
-    10 to (ClockTime(19, 25) to ClockTime(20, 10)),
-    11 to (ClockTime(20, 20) to ClockTime(21, 5)),
-    12 to (ClockTime(21, 15) to ClockTime(22, 0))
-)
-
-private val SECTION_TIME_HUNNAN = mapOf(
-    1 to (ClockTime(8, 30) to ClockTime(9, 15)),
-    2 to (ClockTime(9, 25) to ClockTime(10, 10)),
-    3 to (ClockTime(10, 30) to ClockTime(11, 15)),
-    4 to (ClockTime(11, 25) to ClockTime(12, 10)),
-    5 to (ClockTime(14, 0) to ClockTime(14, 45)),
-    6 to (ClockTime(14, 55) to ClockTime(15, 40)),
-    7 to (ClockTime(16, 0) to ClockTime(16, 45)),
-    8 to (ClockTime(16, 55) to ClockTime(17, 40)),
-    9 to (ClockTime(18, 30) to ClockTime(19, 15)),
-    10 to (ClockTime(19, 25) to ClockTime(20, 10)),
-    11 to (ClockTime(20, 20) to ClockTime(21, 5)),
-    12 to (ClockTime(21, 15) to ClockTime(22, 0))
-)
