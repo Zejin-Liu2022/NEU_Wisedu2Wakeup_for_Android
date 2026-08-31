@@ -9,6 +9,7 @@ import java.net.URL
 import java.net.URLEncoder
 import java.text.SimpleDateFormat
 import java.nio.charset.StandardCharsets
+import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
 
@@ -100,6 +101,15 @@ class JwxtClient(
         }
         parser.parse(startDate)?.time
             ?: throw IOException("学期起始日期解析失败：$startDate")
+    }
+
+    suspend fun fetchExams(termCode: String): List<CourseRow> = withContext(Dispatchers.IO) {
+        val response = requestJson(
+            method = "GET",
+            path = "/jwapp/sys/homeapp/api/home/student/exams.do?termCode=$termCode"
+        )
+        val list = response.optJSONArray("datas") ?: return@withContext emptyList()
+        parseExamList(list)
     }
 
     private fun fetchByScheduleDetail(termCode: String): List<CourseRow> {
@@ -250,6 +260,69 @@ class JwxtClient(
         return result
     }
 
+    private fun parseExamList(examList: org.json.JSONArray): List<CourseRow> {
+        val result = mutableListOf<CourseRow>()
+
+        for (i in 0 until examList.length()) {
+            val item = examList.optJSONObject(i) ?: continue
+            val courseName = item.optString("courseName").trim()
+            val examType = item.optString("examType").trim()
+            val examPlace = item.optString("examPlace").trim()
+            val examSeatNo = item.optString("examSeatNo").trim()
+            val examDate = item.optString("examDate").trim()
+            val examTimeDescription = item.optString("examTimeDescription").trim()
+            val week = item.optInt("week", -1)
+
+            if (courseName.isBlank() || examTimeDescription.isBlank() || week <= 0) continue
+
+            val dayOfWeek = parseExamDayOfWeek(examDate, examTimeDescription) ?: continue
+            val timeRange = parseExamClockRange(examTimeDescription) ?: continue
+            val campus = inferCampusByLocation(examPlace)
+            val sectionRange = findNearestExamSections(
+                campus = campus,
+                startHour = timeRange.startHour,
+                startMinute = timeRange.startMinute,
+                endHour = timeRange.endHour,
+                endMinute = timeRange.endMinute
+            ) ?: continue
+
+            val displayCourseName = buildString {
+                append("[考]")
+                append(courseName)
+                if (examType.isNotBlank()) {
+                    append(" ")
+                    append(examType)
+                }
+            }
+            val displayLocation = buildString {
+                append(examPlace.ifBlank { "暂未安排考场" })
+                if (examSeatNo.isNotBlank()) {
+                    append("，")
+                    append(examSeatNo)
+                    append("号")
+                }
+            }
+            val displayTeacher = if (examSeatNo.isNotBlank()) {
+                "座位号：${examSeatNo}号"
+            } else {
+                "座位号：待定"
+            }
+
+            result += CourseRow(
+                courseName = displayCourseName,
+                dayOfWeek = dayOfWeek,
+                beginSection = sectionRange.beginSection,
+                endSection = sectionRange.endSection,
+                teacher = displayTeacher,
+                location = displayLocation,
+                weeks = "${week}周",
+                campus = campus
+            )
+        }
+
+        return result
+    }
+
     private fun requestJson(
         method: String,
         path: String,
@@ -318,6 +391,48 @@ class JwxtClient(
         val begin = SECTION_MAP[parts[0]] ?: return null
         val end = SECTION_MAP[parts[1]] ?: return null
         return begin to end
+    }
+
+    private data class ExamClockRange(
+        val startHour: Int,
+        val startMinute: Int,
+        val endHour: Int,
+        val endMinute: Int
+    )
+
+    private fun parseExamClockRange(description: String): ExamClockRange? {
+        val match = Regex("(\\d{1,2}):(\\d{2})-(\\d{1,2}):(\\d{2})").find(description) ?: return null
+        return ExamClockRange(
+            startHour = match.groupValues[1].toInt(),
+            startMinute = match.groupValues[2].toInt(),
+            endHour = match.groupValues[3].toInt(),
+            endMinute = match.groupValues[4].toInt()
+        )
+    }
+
+    private fun parseExamDayOfWeek(examDate: String, description: String): Int? {
+        val parser = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).apply {
+            timeZone = TimeZone.getTimeZone("Asia/Shanghai")
+        }
+        val parsedDate = runCatching { parser.parse(examDate) }.getOrNull()
+        if (parsedDate != null) {
+            val calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai")).apply {
+                time = parsedDate
+            }
+            return when (calendar.get(Calendar.DAY_OF_WEEK)) {
+                Calendar.MONDAY -> 1
+                Calendar.TUESDAY -> 2
+                Calendar.WEDNESDAY -> 3
+                Calendar.THURSDAY -> 4
+                Calendar.FRIDAY -> 5
+                Calendar.SATURDAY -> 6
+                Calendar.SUNDAY -> 7
+                else -> null
+            }
+        }
+
+        val weekText = Regex("星期[一二三四五六日天]").find(description)?.value ?: return null
+        return DAY_OF_WEEK_MAP[weekText]
     }
 
     private fun encodeFormBody(params: Map<String, String>): String {
